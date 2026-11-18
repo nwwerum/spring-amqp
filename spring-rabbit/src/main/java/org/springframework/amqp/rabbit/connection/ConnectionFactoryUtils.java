@@ -58,6 +58,10 @@ public final class ConnectionFactoryUtils {
 
 	/**
 	 * Obtain a RabbitMQ Channel that is synchronized with the current transaction, if any.
+	 * If this method is called when a listener container consumer channel is registered
+	 * (see {@link ConsumerChannelRegistry}) and no resource is bound yet, the consumer channel
+	 * is used. This is intended for transaction managers, which start a transaction
+	 * on the consumer channel.
 	 * @param connectionFactory the ConnectionFactory to obtain a Channel for
 	 * @param synchedLocalTransactionAllowed whether to allow for a local RabbitMQ transaction that is synchronized with
 	 * a Spring-managed transaction (where the main transaction might be a JDBC-based one for a specific DataSource, for
@@ -68,11 +72,16 @@ public final class ConnectionFactoryUtils {
 	public static RabbitResourceHolder getTransactionalResourceHolder(final ConnectionFactory connectionFactory,
 			final boolean synchedLocalTransactionAllowed) {
 
-		return getTransactionalResourceHolder(connectionFactory, synchedLocalTransactionAllowed, false);
+		return doGetTransactionalResourceHolder(connectionFactory, new RabbitResourceFactory(connectionFactory,
+				synchedLocalTransactionAllowed, false), true);
 	}
 
 	/**
 	 * Obtain a RabbitMQ Channel that is synchronized with the current transaction, if any.
+	 * A listener container consumer channel is only used if it is already bound to the
+	 * current transaction; it is never taken over for a new (for example,
+	 * {@code PROPAGATION_REQUIRES_NEW}) transaction, since that transaction must be
+	 * independent and must not close, commit or roll back the consumer channel.
 	 * @param connectionFactory the ConnectionFactory to obtain a Channel for
 	 * @param synchedLocalTransactionAllowed whether to allow for a local RabbitMQ transaction that is synchronized with
 	 * a Spring-managed transaction (where the main transaction might be a JDBC-based one for a specific DataSource, for
@@ -86,7 +95,7 @@ public final class ConnectionFactoryUtils {
 			final boolean synchedLocalTransactionAllowed, final boolean publisherConnectionIfPossible) {
 
 		return doGetTransactionalResourceHolder(connectionFactory, new RabbitResourceFactory(connectionFactory,
-				synchedLocalTransactionAllowed, publisherConnectionIfPossible));
+				synchedLocalTransactionAllowed, publisherConnectionIfPossible), false);
 	}
 
 	/**
@@ -94,11 +103,13 @@ public final class ConnectionFactoryUtils {
 	 * @param connectionFactory the RabbitMQ ConnectionFactory to bind for (used as TransactionSynchronizationManager
 	 * key)
 	 * @param resourceFactory the ResourceFactory to use for extracting or creating RabbitMQ resources
+	 * @param useConsumerChannel whether to use the channel registered for the current listener
+	 * container consumer, if any, when no resource is bound yet
 	 * @return the transactional Channel
 	 */
 	@SuppressWarnings("NullAway") // Dataflow analysis limitation
 	private static RabbitResourceHolder doGetTransactionalResourceHolder(// NOSONAR complexity
-			ConnectionFactory connectionFactory, ResourceFactory resourceFactory) {
+			ConnectionFactory connectionFactory, ResourceFactory resourceFactory, boolean useConsumerChannel) {
 
 		Assert.notNull(connectionFactory, "ConnectionFactory must not be null");
 		Assert.notNull(resourceFactory, "ResourceFactory must not be null");
@@ -119,10 +130,11 @@ public final class ConnectionFactoryUtils {
 		Channel channel;
 		try {
 			/*
-			 * If we are in a listener container, first see if there's a channel registered
-			 * for this consumer and the consumer is using the same connection factory.
+			 * If we are in a listener container (and the caller allows it), first see if there's
+			 * a channel registered for this consumer and the consumer is using the same
+			 * connection factory.
 			 */
-			channel = ConsumerChannelRegistry.getConsumerChannel(connectionFactory);
+			channel = useConsumerChannel ? ConsumerChannelRegistry.getConsumerChannel(connectionFactory) : null;
 			if (channel == null && connection == null) {
 				connection = resourceFactory.createConnection();
 				if (resourceHolder == null) {
